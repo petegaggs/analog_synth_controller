@@ -12,10 +12,12 @@
 #include <midi_Message.h>
 #include <midi_Namespace.h>
 #include <midi_Settings.h> 
-MIDI_CREATE_DEFAULT_INSTANCE(); 
+MIDI_CREATE_DEFAULT_INSTANCE();
+#include <SPI.h>
 #include <avr/pgmspace.h>
 #include <avr/io.h> 
 #include <avr/interrupt.h>
+#define SLAVE_SELECT_PIN 7 //spi chip select
 #define NOISE_PIN 8
 #define LFO_PWM OCR1A
 #define LFO_PWM_PIN 9
@@ -27,6 +29,7 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define ENV_RELEASE_PIN A3
 #define LFO_FREQ_PIN A4
 #define LFO_WAVE_PIN A5
+#define DAC_SCALE_PER_SEMITONE 42
 
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
 
@@ -96,8 +99,11 @@ void setup() {
   MIDI.setHandleNoteOff(handleNoteOff);
   pinMode(LFO_PWM_PIN, OUTPUT);
   pinMode(ENV_PWM_PIN, OUTPUT); //PWM OC2B Envelope output
-  pinMode(7, OUTPUT); // test pin for timing only, temporary
   pinMode(NOISE_PIN, OUTPUT);
+  //SPI stuff
+  pinMode (SLAVE_SELECT_PIN, OUTPUT); // set the slaveSelectPin as an output:
+  digitalWrite(SLAVE_SELECT_PIN,HIGH); //set chip select high
+  SPI.begin(); 
   // timer 1 phase accurate PWM 8 bit, no prescaling, non inverting mode channels A & B used
   TCCR1A = _BV(COM1A1) | _BV(COM1B1)| _BV(WGM10);
   TCCR1B = _BV(CS10);
@@ -105,8 +111,25 @@ void setup() {
   TIMSK1 = _BV(TOIE1);
   // envelope stuff
   envState = WAIT;
-  envPhaccu = 0;
-  lastEnvCnt = 0;
+}
+
+void dacWrite(int value) {
+  //write a 12 bit number to the MCP8421 DAC
+  if ((value < 0) || (value > 4095)) {
+    value = 0;
+  }
+  // take the SS pin low to select the chip:
+  digitalWrite(SLAVE_SELECT_PIN,LOW);
+  //send a value to the DAC
+  SPI.transfer(0x10 | ((value >> 8) & 0x0F)); //bits 0..3 are bits 8..11 of 12 bit value, bits 4..7 are control data 
+  SPI.transfer(value & 0xFF); //bits 0..7 of 12 bit value
+  // take the SS pin high to de-select the chip:
+  digitalWrite(SLAVE_SELECT_PIN,HIGH); 
+}
+
+void setNotePitch(int note) {
+  //receive a midi note number and set the DAC voltage accordingly for the pitch CV
+  dacWrite(note * DAC_SCALE_PER_SEMITONE);
 }
 
 void getLfoFreq() {
@@ -152,7 +175,6 @@ void loop() {
 }
 
 SIGNAL(TIMER1_OVF_vect) {
-  PORTD = 0x80; // to test timing
   // handle noise signal. Set or clear noise pin PB0 (digital pin 8)
   unsigned lsb = lfsr & 1;
   if (lsb) {
@@ -247,7 +269,6 @@ SIGNAL(TIMER1_OVF_vect) {
     default:
       break;
   }
-  PORTD = 0; // to test timing
 }
 
 void handleNoteOn(byte channel, byte pitch, byte velocity) { 
@@ -287,7 +308,7 @@ int findHighestKeyPressed(void) {
 
 void synthNoteOn(int note) {
   //starts playback of a note
-  //setNotePitch(note); //set the oscillator pitch
+  setNotePitch(note); //set the oscillator pitch
   if ((envState != ATTACK) && (envState != SUSTAIN)) {
     envState = START_ATTACK;
   }
