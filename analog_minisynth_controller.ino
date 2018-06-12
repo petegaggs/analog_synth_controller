@@ -261,7 +261,7 @@ SIGNAL(TIMER1_OVF_vect) {
       envState = DECAY;
       break;
     case DECAY:
-      envPhaccu += envReleaseTword; // increment phase accumulator
+      envPhaccu += envDecayTword; // increment phase accumulator
       envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
       if (envCnt < lastEnvCnt) {
         envState = SUSTAIN; // end of release stage when counter wraps
