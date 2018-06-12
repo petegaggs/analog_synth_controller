@@ -78,8 +78,8 @@ uint32_t envDecayTword;  // dds tuning word decay stage
 uint8_t envSustainControl; // envelope sustain control 0-255
 uint8_t envCnt;      // top 8 bits of accum is index into table
 uint8_t lastEnvCnt;
-uint8_t envCurrentLevel; // the current level of envelope during attack/decay/sustain stage
-uint8_t envReleaseLevel; // the current level of envelope during release stage
+uint8_t envCurrentLevel; // the current level of envelope
+uint8_t envStoredLevel; // the level that the envelope was at start of release stage
 uint8_t envMultFactor; // multiplication factor to account for release starting before attack complete and visa versa
 float envControlVoltage;
 
@@ -234,13 +234,14 @@ SIGNAL(TIMER1_OVF_vect) {
     case WAIT:
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
-      envReleaseLevel = 0;
+      envCurrentLevel = 0;
       ENV_PWM = 0;
       break;
     case START_ATTACK:
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
-      envMultFactor = 255 - envReleaseLevel;
+      envMultFactor = 255 - envCurrentLevel;
+      envStoredLevel = envCurrentLevel;
       envState = ATTACK;
       break;
     case ATTACK:
@@ -249,7 +250,7 @@ SIGNAL(TIMER1_OVF_vect) {
       if (envCnt < lastEnvCnt) {
         envState = START_DECAY; // end of attack stage when counter wraps
       } else {
-        envCurrentLevel = ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8) + envReleaseLevel;
+        envCurrentLevel = ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8) + envStoredLevel;
         ENV_PWM = envCurrentLevel;
         lastEnvCnt = envCnt;
       }
@@ -281,6 +282,7 @@ SIGNAL(TIMER1_OVF_vect) {
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
       envMultFactor = envCurrentLevel;
+      envStoredLevel = envCurrentLevel;
       envState = RELEASE;
       break;
     case RELEASE:
@@ -289,8 +291,8 @@ SIGNAL(TIMER1_OVF_vect) {
       if (envCnt < lastEnvCnt) {
         envState = WAIT; // end of release stage when counter wraps
       } else {
-        envReleaseLevel = envCurrentLevel - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
-        ENV_PWM = envReleaseLevel;
+        envCurrentLevel = envStoredLevel - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
+        ENV_PWM = envCurrentLevel;
         lastEnvCnt = envCnt;
       }
       break;
@@ -338,7 +340,7 @@ int findHighestKeyPressed(void) {
 void synthNoteOn(int note) {
   //starts playback of a note
   setNotePitch(note); //set the oscillator pitch
-  if ((envState != ATTACK) && (envState != SUSTAIN)) {
+  if (envState != ATTACK) {
     envState = START_ATTACK;
   }
   currentMidiNote = note; //store the current note
