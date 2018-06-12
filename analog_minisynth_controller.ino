@@ -24,11 +24,12 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #define ENV_PWM OCR1B
 #define ENV_PWM_PIN 10
 #define ENV_ATTACK_PIN A0
-#define ENV_DECAY_PIN A1 //not used yet
-#define ENV_SUSTAIN_PIN A2 //not used yet
+#define ENV_DECAY_PIN A1
+#define ENV_SUSTAIN_PIN A2
 #define ENV_RELEASE_PIN A3
 #define LFO_FREQ_PIN A4
 #define LFO_WAVE_PIN A5
+#define LFO_SYNC_MODE_PIN 2 // The lfo can be reset by note on if desired
 #define DAC_SCALE_PER_SEMITONE 42
 
 uint32_t lfsr = 1; //32 bit LFSR, must be non-zero to start
@@ -44,14 +45,13 @@ const char sineTable[] PROGMEM = {
 
 // table of exponential rising waveform for envelope gen
 const char expTable[] PROGMEM = {
-  0,5,10,15,19,24,28,33,37,41,45,49,53,57,61,65,68,72,76,79,82,86,89,92,95,99,102,105,107,110,113,116,119,121,124,126,129,131,134,136,138,141,143,145,147,149,151,153,155,157,159,161,163,164,166,168,
-  170,171,173,174,176,178,179,181,182,183,185,186,187,189,190,191,193,194,195,196,197,198,199,200,202,203,204,205,206,207,207,208,209,210,211,212,213,214,214,215,216,217,217,218,219,220,220,221,222,
-  222,223,223,224,225,225,226,226,227,227,228,229,229,230,230,231,231,231,232,232,233,233,234,234,234,235,235,236,236,236,237,237,237,238,238,238,239,239,239,240,240,240,241,241,241,241,242,242,242,
-  242,243,243,243,243,244,244,244,244,244,245,245,245,245,245,246,246,246,246,246,246,247,247,247,247,247,247,248,248,248,248,248,248,248,249,249,249,249,249,249,249,249,249,250,250,250,250,250,250,
-  250,250,250,250,251,251,251,251,251,251,251,251,251,251,251,251,251,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,252,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,
-  253,253,253,255
+  0,5,10,15,19,24,28,33,37,41,45,49,53,57,61,65,69,72,76,79,83,86,89,93,96,99,102,105,108,111,114,116,119,122,124,127,129,132,134,136,139,141,143,145,148,150,152,154,156,158,160,161,163,165,167,169,
+  170,172,174,175,177,178,180,181,183,184,185,187,188,189,191,192,193,194,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,214,215,216,217,218,218,219,220,220,221,222,222,
+  223,224,224,225,226,226,227,227,228,228,229,229,230,230,231,231,232,232,233,233,234,234,235,235,235,236,236,237,237,237,238,238,238,239,239,239,240,240,240,241,241,241,242,242,242,242,243,243,243,
+  243,244,244,244,244,245,245,245,245,245,246,246,246,246,246,247,247,247,247,247,247,248,248,248,248,248,248,249,249,249,249,249,249,249,249,250,250,250,250,250,250,250,250,251,251,251,251,251,251,
+  251,251,251,251,252,252,252,252,252,252,252,252,252,252,252,252,252,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,253,254,254,254,254,254,254,254,254,254,254,254,254,254,254,254,
+  254,254,254,254
 };
-
 
 // LFO stuff
 uint32_t lfoPhaccu;   // phase accumulator
@@ -67,14 +67,18 @@ enum lfoWaveTypes {
   SQR
 };
 lfoWaveTypes lfoWaveform;
+bool lfoSyncMode = false;
+bool lfoReset = false;
 
 // envelope stuff
 uint32_t envPhaccu;   // phase accumulator
 uint32_t envAttackTword;  // dds tuning word attack stage
 uint32_t envReleaseTword;  // dds tuning word release stage
+uint32_t envDecayTword;  // dds tuning word decay stage
+uint8_t envSustainControl; // envelope sustain control 0-255
 uint8_t envCnt;      // top 8 bits of accum is index into table
 uint8_t lastEnvCnt;
-uint8_t envAttackLevel; // the current level of envelope during attack stage
+uint8_t envCurrentLevel; // the current level of envelope during attack/decay/sustain stage
 uint8_t envReleaseLevel; // the current level of envelope during release stage
 uint8_t envMultFactor; // multiplication factor to account for release starting before attack complete and visa versa
 float envControlVoltage;
@@ -83,6 +87,8 @@ enum envStates {
   WAIT,
   START_ATTACK,
   ATTACK,
+  START_DECAY,
+  DECAY,
   SUSTAIN,
   START_RELEASE,
   RELEASE
@@ -100,10 +106,13 @@ void setup() {
   pinMode(LFO_PWM_PIN, OUTPUT);
   pinMode(ENV_PWM_PIN, OUTPUT); //PWM OC2B Envelope output
   pinMode(NOISE_PIN, OUTPUT);
+  pinMode(LFO_SYNC_MODE_PIN, INPUT);
+  digitalWrite(LFO_SYNC_MODE_PIN, HIGH); //enable internal pullup
   //SPI stuff
   pinMode (SLAVE_SELECT_PIN, OUTPUT); // set the slaveSelectPin as an output:
   digitalWrite(SLAVE_SELECT_PIN,HIGH); //set chip select high
   SPI.begin(); 
+  pinMode(6, OUTPUT); // for testing how long ISR takes
   // timer 1 phase accurate PWM 8 bit, no prescaling, non inverting mode channels A & B used
   TCCR1A = _BV(COM1A1) | _BV(COM1B1)| _BV(WGM10);
   TCCR1B = _BV(CS10);
@@ -132,13 +141,10 @@ void setNotePitch(int note) {
   dacWrite(note * DAC_SCALE_PER_SEMITONE);
 }
 
-void getLfoFreq() {
+void getLfoParams() {
   // read ADC to calculate the required DDS tuning word, log scale between 0.01Hz and 10Hz approx
   float lfoControlVoltage = analogRead(LFO_FREQ_PIN) * 11/1024; //gives 11 octaves range 0.01Hz to 10Hz
   lfoTword_m = 1369 * pow(2.0, lfoControlVoltage); //1369 sets the lowest frequency to 0.01Hz
-}
-
-void getLfoWaveform() {
   // read ADC to get the LFO wave type
   int adcVal = analogRead(LFO_WAVE_PIN);
   if (adcVal < 128) {
@@ -152,29 +158,29 @@ void getLfoWaveform() {
   } else {
     lfoWaveform = SQR;
   }
+  lfoSyncMode = digitalRead(LFO_SYNC_MODE_PIN) == 0 ? true : false;
 }
 
-void getEnvAttack() {
+void getEnvParams() {
+  float envControlVoltage;
   // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
-  float envControlVoltage = (1023 - analogRead(ENV_ATTACK_PIN)) * 13/1024; //gives 13 octaves range 1ms to 10s
+  envControlVoltage = (1023 - analogRead(ENV_ATTACK_PIN)) * 13/1024; //gives 13 octaves range 1ms to 10s
   envAttackTword = 13690 * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
-}
-
-void getEnvRelease() {
-  // read ADC to calculate the required DDS tuning word, log scale between 1ms and 10s approx
-  float envControlVoltage = (1023 - analogRead(ENV_RELEASE_PIN)) * 13/1024; //gives 13 octaves range 1ms to 10s
+  envControlVoltage = (1023 - analogRead(ENV_RELEASE_PIN)) * 13/1024; //gives 13 octaves range 1ms to 10s
   envReleaseTword = 13690 * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
+  envControlVoltage = (1023 - analogRead(ENV_DECAY_PIN)) * 13/1024; //gives 13 octaves range 1ms to 10s
+  envDecayTword = 13690 * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
+  envSustainControl = analogRead(ENV_SUSTAIN_PIN) >> 2; //0 to 255 level for sustain control
 }
 
 void loop() {
   MIDI.read();
-  getLfoFreq();
-  getLfoWaveform();
-  getEnvAttack();
-  getEnvRelease();
+  getLfoParams();
+  getEnvParams();
 }
 
 SIGNAL(TIMER1_OVF_vect) {
+  PORTD |= 0x40; //set D6 to test timing
   // handle noise signal. Set or clear noise pin PB0 (digital pin 8)
   unsigned lsb = lfsr & 1;
   if (lsb) {
@@ -187,8 +193,13 @@ SIGNAL(TIMER1_OVF_vect) {
   if (lsb) {
     lfsr ^= 0xA3000000u;
   }
-  // handle LFO DDS  
-  lfoPhaccu += lfoTword_m; // increment phase accumulator
+  // handle LFO DDS
+  if (lfoReset) {
+    lfoPhaccu = 0; // reset the lfo
+    lfoReset = false;
+  } else {
+    lfoPhaccu += lfoTword_m; // increment phase accumulator  
+  }
   lfoCnt = lfoPhaccu >> 24;  // use upper 8 bits for phase accu as frequency information
   switch (lfoWaveform) {
     case RAMP:
@@ -236,23 +247,40 @@ SIGNAL(TIMER1_OVF_vect) {
       envPhaccu += envAttackTword; // increment phase accumulator
       envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
       if (envCnt < lastEnvCnt) {
-        envState = SUSTAIN; // end of attack stage when counter wraps
+        envState = START_DECAY; // end of attack stage when counter wraps
       } else {
-        envAttackLevel = ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8) + envReleaseLevel;
-        ENV_PWM = envAttackLevel;
+        envCurrentLevel = ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8) + envReleaseLevel;
+        ENV_PWM = envCurrentLevel;
+        lastEnvCnt = envCnt;
+      }
+      break;
+    case START_DECAY:
+      envPhaccu = 0; // clear the accumulator
+      lastEnvCnt = 0;
+      envMultFactor = 255 - envSustainControl;
+      envState = DECAY;
+      break;
+    case DECAY:
+      envPhaccu += envReleaseTword; // increment phase accumulator
+      envCnt = envPhaccu >> 24;  // use upper 8 bits as index into table
+      if (envCnt < lastEnvCnt) {
+        envState = SUSTAIN; // end of release stage when counter wraps
+      } else {
+        envCurrentLevel = 255 - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
+        ENV_PWM = envCurrentLevel;
         lastEnvCnt = envCnt;
       }
       break;
     case SUSTAIN:
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
-      envAttackLevel = 255;
-      ENV_PWM = 255;
+      envCurrentLevel = envSustainControl;
+      ENV_PWM = envCurrentLevel;
       break;
     case START_RELEASE:
       envPhaccu = 0; // clear the accumulator
       lastEnvCnt = 0;
-      envMultFactor = envAttackLevel;
+      envMultFactor = envCurrentLevel;
       envState = RELEASE;
       break;
     case RELEASE:
@@ -261,7 +289,7 @@ SIGNAL(TIMER1_OVF_vect) {
       if (envCnt < lastEnvCnt) {
         envState = WAIT; // end of release stage when counter wraps
       } else {
-        envReleaseLevel = envAttackLevel - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
+        envReleaseLevel = envCurrentLevel - ((envMultFactor * pgm_read_byte_near(expTable + envCnt)) >> 8);
         ENV_PWM = envReleaseLevel;
         lastEnvCnt = envCnt;
       }
@@ -269,6 +297,7 @@ SIGNAL(TIMER1_OVF_vect) {
     default:
       break;
   }
+  PORTD &= ~0x40; //clear D6 to test timing
 }
 
 void handleNoteOn(byte channel, byte pitch, byte velocity) { 
@@ -313,6 +342,9 @@ void synthNoteOn(int note) {
     envState = START_ATTACK;
   }
   currentMidiNote = note; //store the current note
+  if (lfoSyncMode) {
+    lfoReset = true;
+  }
 }
 
 void synthNoteOff(void) {
