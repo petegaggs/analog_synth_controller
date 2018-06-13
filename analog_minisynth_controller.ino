@@ -305,7 +305,7 @@ SIGNAL(TIMER1_OVF_vect) {
 void handleNoteOn(byte channel, byte pitch, byte velocity) { 
   // this function is called automatically when a note on message is received 
   keysPressedArray[pitch] = 1;
-  synthNoteOn(pitch);
+  synthNoteOn(pitch, true);
 }
 
 void handleNoteOff(byte channel, byte pitch, byte velocity)
@@ -315,8 +315,8 @@ void handleNoteOff(byte channel, byte pitch, byte velocity)
     //only act if the note released is the one currently playing, otherwise ignore it
     int highestKeyPressed = findHighestKeyPressed(); //search the array to find the highest key pressed, will return -1 if no keys pressed
     if (highestKeyPressed != -1) { 
-      //there is another key pressed somewhere, so the note off becomes a note on for the highest note pressed
-      synthNoteOn(highestKeyPressed);
+      //there is another key pressed somewhere, update pictch according to the highest note pressed
+      synthNoteOn(highestKeyPressed, false);
     }    
     else  {
       //there are no other keys pressed so proper note off
@@ -337,10 +337,10 @@ int findHighestKeyPressed(void) {
   return(highestKeyPressed);
 }
 
-void synthNoteOn(int note) {
+void synthNoteOn(int note, bool startAttack) {
   //starts playback of a note
   setNotePitch(note); //set the oscillator pitch
-  if (envState != ATTACK) {
+  if (startAttack && (envState != ATTACK)) {
     envState = START_ATTACK;
   }
   currentMidiNote = note; //store the current note
