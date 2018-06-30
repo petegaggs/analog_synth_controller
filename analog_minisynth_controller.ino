@@ -342,6 +342,8 @@ void synthNoteOn(int note, bool startAttack) {
   setNotePitch(note); //set the oscillator pitch
   if (startAttack && (envState != ATTACK)) {
     envState = START_ATTACK;
+  } else if (envState == ATTACK) {
+    envState = START_DECAY;
   }
   currentMidiNote = note; //store the current note
   if (lfoSyncMode) {
