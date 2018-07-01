@@ -7,6 +7,8 @@
  * LFO (PWM), several waveforms
  * Noise source
  */
+#define NOTE_PRIORITY_LAST // supports HIGH, LOW, LAST
+#define TRIGGER_MULTI_RELEASE // supports SINGLE, MULTI, MULTI_RELEASE
 #include <MIDI.h>
 #include <midi_Defs.h>
 #include <midi_Message.h>
@@ -98,6 +100,7 @@ envStates envState;
 //MIDI variables
 int currentMidiNote; //the note currently being played
 int keysPressedArray[128] = {0}; //to keep track of which keys are pressed
+bool notePlaying = false;
 
 void setup() {
   MIDI.begin(MIDI_CHANNEL_OMNI);      
@@ -303,20 +306,59 @@ SIGNAL(TIMER1_OVF_vect) {
 }
 
 void handleNoteOn(byte channel, byte pitch, byte velocity) { 
-  // this function is called automatically when a note on message is received 
+  // this function is called automatically when a note on message is received
+  bool trigger;
+  #ifdef TRIGGER_SINGLE
+  if (notePlaying == false) {
+    trigger = true;
+  } else {
+    trigger = false;
+  }
+  #endif
+  #ifdef TRIGGER_MULTI
+  trigger = true;
+  #endif
+  #ifdef TRIGGER_MULTI_RELEASE
+  trigger = true;
+  #endif
   keysPressedArray[pitch] = 1;
-  synthNoteOn(pitch);
+  #ifdef NOTE_PRIORITY_HIGH
+  if (pitch == findHighestKeyPressed()) {
+    synthNoteOn(pitch, trigger);
+  }
+  #endif
+  #ifdef NOTE_PRIORITY_LOW
+  if (pitch == findLowestKeyPressed()) {
+    synthNoteOn(pitch, trigger);
+  }
+  #endif
+  #ifdef NOTE_PRIORITY_LAST
+  synthNoteOn(pitch, trigger);
+  #endif
 }
 
 void handleNoteOff(byte channel, byte pitch, byte velocity)
 {
+  int newKey;
+  bool trigger = false;
   keysPressedArray[pitch] = 0; //update the array holding the keys pressed 
   if (pitch == currentMidiNote) {
     //only act if the note released is the one currently playing, otherwise ignore it
-    int highestKeyPressed = findHighestKeyPressed(); //search the array to find the highest key pressed, will return -1 if no keys pressed
-    if (highestKeyPressed != -1) { 
-      //there is another key pressed somewhere, update pictch according to the highest note pressed
-      synthNoteOn(highestKeyPressed);
+    #ifdef NOTE_PRIORITY_HIGH
+    newKey = findHighestKeyPressed(); //search the array to find the highest key pressed, will return -1 if no keys pressed
+    #endif
+    #ifdef NOTE_PRIORITY_LOW
+    newKey = findLowestKeyPressed(); //search the array to find the lowest key pressed, will return -1 if no keys pressed
+    #endif
+    #ifdef NOTE_PRIORITY_LAST
+    newKey = findLowestKeyPressed(); //this is a tricky one, treat same as lowest priority
+    #endif
+    #ifdef TRIGGER_MULTI_RELEASE
+    trigger = true;
+    #endif
+    if (newKey != -1) { 
+      //there is another key pressed somewhere, update pitch according to note priority
+      synthNoteOn(newKey, true);
     }    
     else  {
       //there are no other keys pressed so proper note off
@@ -328,7 +370,7 @@ void handleNoteOff(byte channel, byte pitch, byte velocity)
 int findHighestKeyPressed(void) {
   //search the array to find the highest key pressed. Return -1 if no keys are pressed
   int highestKeyPressed = -1; 
-  for (int count = 0; count < 127; count++) {
+  for (int count = 0; count < 128; count++) {
     //go through the array holding the keys pressed to find which is the highest (highest note has priority), and to find out if no keys are pressed
     if (keysPressedArray[count] == 1) {
       highestKeyPressed = count; //find the highest one
@@ -337,20 +379,36 @@ int findHighestKeyPressed(void) {
   return(highestKeyPressed);
 }
 
-void synthNoteOn(int note) {
+int findLowestKeyPressed(void) {
+  //search the array to find the lowest key pressed. Return -1 if no keys are pressed
+  int lowestKeyPressed = -1; 
+  for (int count = 127; count >= 0; count--) {
+    //go through the array holding the keys pressed to find which is the lowest (lowest note has priority), and to find out if no keys are pressed
+    if (keysPressedArray[count] == 1) {
+      lowestKeyPressed = count; //find the lowest one
+    }
+  }
+  return(lowestKeyPressed);
+}
+
+void synthNoteOn(int note, bool trigger) {
   //starts playback of a note
   setNotePitch(note); //set the oscillator pitch
-  if (envState != ATTACK) {
-    envState = START_ATTACK;
+  if (trigger){
+    if (envState != ATTACK) {
+      envState = START_ATTACK;
+    }
+    if (lfoSyncMode) {
+      lfoReset = true;
+    }
   }
   currentMidiNote = note; //store the current note
-  if (lfoSyncMode) {
-    lfoReset = true;
-  }
+  notePlaying = true;
 }
 
 void synthNoteOff(void) {
   envState = START_RELEASE;
+  notePlaying = false;
 }
 
 
