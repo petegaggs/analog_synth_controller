@@ -21,6 +21,8 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 #include <avr/interrupt.h>
 #define SLAVE_SELECT_PIN 7 //spi chip select
 #define NOISE_PIN 8
+#define TEST_PIN 6 //test critical interrupt timing
+#define AUTO_REPEAT_MODE_PIN 5
 #define LFO_PWM OCR1A
 #define LFO_PWM_PIN 9
 #define ENV_PWM OCR1B
@@ -85,6 +87,8 @@ uint8_t envStoredLevel; // the level that the envelope was at start of release s
 uint8_t envMultFactor; // multiplication factor to account for release starting before attack complete and visa versa
 float envControlVoltage;
 
+bool autoRepeatMode = false;
+
 enum envStates {
   WAIT,
   START_ATTACK,
@@ -111,11 +115,13 @@ void setup() {
   pinMode(NOISE_PIN, OUTPUT);
   pinMode(LFO_SYNC_MODE_PIN, INPUT);
   digitalWrite(LFO_SYNC_MODE_PIN, HIGH); //enable internal pullup
+  pinMode(AUTO_REPEAT_MODE_PIN, INPUT);
+  digitalWrite(AUTO_REPEAT_MODE_PIN, HIGH); //enable internal pullup
   //SPI stuff
   pinMode (SLAVE_SELECT_PIN, OUTPUT); // set the slaveSelectPin as an output:
   digitalWrite(SLAVE_SELECT_PIN,HIGH); //set chip select high
   SPI.begin(); 
-  pinMode(6, OUTPUT); // for testing how long ISR takes
+  pinMode(TEST_PIN, OUTPUT); // for testing how long ISR takes
   // timer 1 phase accurate PWM 8 bit, no prescaling, non inverting mode channels A & B used
   TCCR1A = _BV(COM1A1) | _BV(COM1B1)| _BV(WGM10);
   TCCR1B = _BV(CS10);
@@ -123,6 +129,7 @@ void setup() {
   TIMSK1 = _BV(TOIE1);
   // envelope stuff
   envState = WAIT;
+  setNotePitch(60); // Middle C, just to get things started
 }
 
 void dacWrite(int value) {
@@ -174,6 +181,7 @@ void getEnvParams() {
   envControlVoltage = (1023 - analogRead(ENV_DECAY_PIN)) * 13/1024; //gives 13 octaves range 1ms to 10s
   envDecayTword = 13690 * pow(2.0, envControlVoltage); //13690 sets the longest rise time to 10s
   envSustainControl = analogRead(ENV_SUSTAIN_PIN) >> 2; //0 to 255 level for sustain control
+  autoRepeatMode = digitalRead(AUTO_REPEAT_MODE_PIN) == 0 ? true : false;
 }
 
 void loop() {
@@ -239,6 +247,9 @@ SIGNAL(TIMER1_OVF_vect) {
       lastEnvCnt = 0;
       envCurrentLevel = 0;
       ENV_PWM = 0;
+      if (autoRepeatMode) {
+        envState = START_ATTACK;
+      }
       break;
     case START_ATTACK:
       envPhaccu = 0; // clear the accumulator
@@ -280,6 +291,9 @@ SIGNAL(TIMER1_OVF_vect) {
       lastEnvCnt = 0;
       envCurrentLevel = envSustainControl;
       ENV_PWM = envCurrentLevel;
+      if (autoRepeatMode) {
+        envState = START_RELEASE;
+      }
       break;
     case START_RELEASE:
       envPhaccu = 0; // clear the accumulator
